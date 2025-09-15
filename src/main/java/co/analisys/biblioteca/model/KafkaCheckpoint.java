@@ -36,6 +36,15 @@ public class KafkaCheckpoint {
     @Column
     private String status; // "PROCESSED", "FAILED", "RETRYING"
     
+    @Column(columnDefinition = "TEXT")
+    private String messageKey;
+    
+    @Column(columnDefinition = "TEXT")
+    private String messagePayload;
+    
+    @Column
+    private String errorMessage;
+    
     public KafkaCheckpoint(String topicName, Integer partitionNumber, Long offsetValue, String consumerGroup) {
         this.topicName = topicName;
         this.partitionNumber = partitionNumber;
@@ -43,5 +52,17 @@ public class KafkaCheckpoint {
         this.consumerGroup = consumerGroup;
         this.lastProcessed = LocalDateTime.now();
         this.status = "PROCESSED";
+    }
+    
+    public KafkaCheckpoint(String topicName, Integer partitionNumber, Long offsetValue, String consumerGroup, 
+                          String messageKey, String messagePayload, String status) {
+        this.topicName = topicName;
+        this.partitionNumber = partitionNumber;
+        this.offsetValue = offsetValue;
+        this.consumerGroup = consumerGroup;
+        this.messageKey = messageKey;
+        this.messagePayload = messagePayload;
+        this.status = status;
+        this.lastProcessed = LocalDateTime.now();
     }
 }

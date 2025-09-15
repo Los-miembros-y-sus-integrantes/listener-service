@@ -37,7 +37,7 @@ public class RecuperacionService {
     private volatile boolean running = false;
     
     private static final String CONSUMER_GROUP = "recuperacion-grupo";
-    private static final List<String> TOPICS = Arrays.asList("ocupacion-clases", "resumen-entrenamiento");
+    private static final List<String> TOPICS = Arrays.asList("ocupacion-clases", "datos-entrenamiento", "resumen-entrenamiento");
 
     @PostConstruct
     public void init() {
@@ -86,7 +86,7 @@ public class RecuperacionService {
                     for (ConsumerRecord<String, String> record : records) {
                         try {
                             procesarRecord(record);
-                            guardarCheckpoint(record.topic(), record.partition(), record.offset(), "PROCESSED");
+                            guardarCheckpoint(record, "PROCESSED", null);
                             
                             // Commit manual después de procesar exitosamente
                             consumer.commitSync();
@@ -95,10 +95,10 @@ public class RecuperacionService {
                             log.error("Error procesando record: topic={}, partition={}, offset={}, error={}",
                                     record.topic(), record.partition(), record.offset(), e.getMessage());
                             
-                            guardarCheckpoint(record.topic(), record.partition(), record.offset(), "FAILED");
+                            guardarCheckpoint(record, "FAILED", e.getMessage());
                             
                             // Estrategia de reintentos
-                            intentarReintento(record, 3);
+                            intentarReintento(record);
                         }
                     }
                 }
@@ -137,26 +137,31 @@ public class RecuperacionService {
     }
 
     @Transactional
-    private void guardarCheckpoint(String topic, int partition, long offset, String status) {
+    private void guardarCheckpoint(ConsumerRecord<String, String> record, String status, String errorMessage) {
         try {
             Optional<KafkaCheckpoint> existingCheckpoint = checkpointRepository
-                    .findByTopicNameAndPartitionNumberAndConsumerGroup(topic, partition, CONSUMER_GROUP);
+                    .findByTopicNameAndPartitionNumberAndConsumerGroup(record.topic(), record.partition(), CONSUMER_GROUP);
             
             KafkaCheckpoint checkpoint;
             if (existingCheckpoint.isPresent()) {
                 checkpoint = existingCheckpoint.get();
-                checkpoint.setOffsetValue(offset);
+                checkpoint.setOffsetValue(record.offset());
                 checkpoint.setStatus(status);
+                checkpoint.setMessageKey(record.key());
+                checkpoint.setMessagePayload(record.value());
+                checkpoint.setErrorMessage(errorMessage);
                 checkpoint.setLastProcessed(LocalDateTime.now());
             } else {
-                checkpoint = new KafkaCheckpoint(topic, partition, offset, CONSUMER_GROUP);
-                checkpoint.setStatus(status);
+                checkpoint = new KafkaCheckpoint(record.topic(), record.partition(), record.offset(), 
+                                               CONSUMER_GROUP, record.key(), record.value(), status);
+                checkpoint.setErrorMessage(errorMessage);
             }
             
             checkpointRepository.save(checkpoint);
             
-            log.debug("Checkpoint guardado: topic={}, partition={}, offset={}, status={}", 
-                    topic, partition, offset, status);
+            log.debug("Checkpoint guardado: topic={}, partition={}, offset={}, status={}, payload_length={}", 
+                    record.topic(), record.partition(), record.offset(), status, 
+                    record.value() != null ? record.value().length() : 0);
             
         } catch (Exception e) {
             log.error("Error guardando checkpoint: {}", e.getMessage());
@@ -171,6 +176,9 @@ public class RecuperacionService {
         switch (record.topic()) {
             case "ocupacion-clases":
                 procesarOcupacionClase(record);
+                break;
+            case "datos-entrenamiento":
+                procesarDatosEntrenamiento(record);
                 break;
             case "resumen-entrenamiento":
                 procesarResumenEntrenamiento(record);
@@ -192,34 +200,50 @@ public class RecuperacionService {
         // Lógica específica para ocupación de clases
     }
 
-    private void procesarResumenEntrenamiento(ConsumerRecord<String, String> record) {
-        log.info("Procesando resumen de entrenamiento: {}", record.value());
-        // Lógica específica para resúmenes de entrenamiento
+    private void procesarDatosEntrenamiento(ConsumerRecord<String, String> record) {
+        log.info("Procesando datos de entrenamiento: {}", record.value());
+        // Lógica específica para datos de entrenamiento sin procesar
     }
 
-    private void intentarReintento(ConsumerRecord<String, String> record, int maxReintentos) {
-        for (int intento = 1; intento <= maxReintentos; intento++) {
-            try {
-                log.info("Reintento {}/{} para record: topic={}, partition={}, offset={}", 
-                        intento, maxReintentos, record.topic(), record.partition(), record.offset());
-                
-                Thread.sleep(1000 * intento); // Backoff exponencial
-                
-                procesarRecord(record);
-                guardarCheckpoint(record.topic(), record.partition(), record.offset(), "PROCESSED");
-                
-                log.info("Reintento exitoso en intento {}", intento);
-                return;
-                
-            } catch (Exception e) {
-                log.error("Reintento {} falló: {}", intento, e.getMessage());
-                guardarCheckpoint(record.topic(), record.partition(), record.offset(), "RETRYING");
+    private void procesarResumenEntrenamiento(ConsumerRecord<String, String> record) {
+        log.info("Procesando resumen de entrenamiento: {}", record.value());
+        // Lógica específica para resúmenes de entrenamiento agregados
+    }
+
+    private void intentarReintento(ConsumerRecord<String, String> record) {
+        try {
+            // Reintentar procesar el mensaje según su topic
+            switch (record.topic()) {
+                case "ocupacion-clases":
+                    procesarOcupacionClase(record);
+                    break;
+                case "datos-entrenamiento":
+                    procesarDatosEntrenamiento(record);
+                    break;
+                case "resumen-entrenamiento":
+                    procesarResumenEntrenamiento(record);
+                    break;
+                default:
+                    throw new RuntimeException("Topic no reconocido: " + record.topic());
             }
+            
+            log.info("Mensaje reprocesado exitosamente: topic={}, partition={}, offset={}", 
+                    record.topic(), record.partition(), record.offset());
+            
+            // Marcar como procesado exitosamente
+            guardarCheckpoint(record, "PROCESSED", null);
+            
+        } catch (Exception e) {
+            String errorMessage = "Error en reintento " + e.getMessage();
+            log.error("Error reintentando procesar mensaje: topic={}, partition={}, offset={}, error={}", 
+                    record.topic(), record.partition(), record.offset(), e.getMessage());
+            
+            // Marcar como reintentando para el siguiente intento
+            guardarCheckpoint(record, "RETRYING", errorMessage);
         }
         
-        log.error("Todos los reintentos fallaron para record: topic={}, partition={}, offset={}", 
-                record.topic(), record.partition(), record.offset());
-        guardarCheckpoint(record.topic(), record.partition(), record.offset(), "FAILED");
+        // Si todos los reintentos fallan, marcar como fallido permanentemente
+        guardarCheckpoint(record, "FAILED", "Excedido numero maximo de reintentos");
     }
 
     public void detenerProcesamiento() {
