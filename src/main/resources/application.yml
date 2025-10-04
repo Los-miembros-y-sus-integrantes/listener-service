@@ -44,7 +44,7 @@ eureka:
     service-url:
       defaultZone: ${EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE:localhost:8761/eureka/%7D}
   instance:
-      hostname: ${EUREKA_INSTANCE:favourite-service}
+      hostname: ${EUREKA_INSTANCE:listener-service}
 
 ribbon:
   eureka:
